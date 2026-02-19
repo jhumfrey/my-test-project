@@ -10,6 +10,11 @@ def health():
     return jsonify({"status": "ok"})
 
 
+@app.route("/data", methods=["GET"])
+def get_data():
+    return jsonify({"data": data_store, "count": len(data_store)})
+
+
 @app.route("/data", methods=["POST"])
 def store_data():
     body = request.get_json(silent=True)
