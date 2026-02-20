@@ -181,9 +181,13 @@ REPORTS_PAGE = """<!DOCTYPE html>
 
     #status { font-size: 0.875rem; min-height: 1.25rem; color: #c0392b; }
 
-    details { background: #f9f9f9; border: 1px solid #eee; border-radius: 6px; padding: 0.5rem 1rem; max-width: 640px; }
-    summary { font-size: 0.8rem; color: #666; cursor: pointer; user-select: none; }
-    pre { margin-top: 0.5rem; font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; color: #333; }
+    .chart-tabs { display: flex; gap: 0.25rem; margin-bottom: 1rem; }
+    .tab-btn { padding: 0.35rem 1rem; border: 1px solid #ccc; border-radius: 5px; background: #f5f5f5; font-size: 0.875rem; cursor: pointer; color: #444; }
+    .tab-btn.active { background: #4f7dff; color: #fff; border-color: #4f7dff; }
+    .tab-btn:hover:not(.active) { background: #e8e8e8; }
+    .sql-block { max-width: 640px; margin-top: 1.5rem; }
+    .sql-block h2 { margin-bottom: 0.5rem; }
+    pre { background: #1e1e1e; color: #d4d4d4; border-radius: 6px; padding: 1rem 1.25rem; font-size: 0.8rem; white-space: pre-wrap; word-break: break-all; overflow-x: auto; }
 
     table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; }
     th, td { padding: 0.65rem 1rem; text-align: left; border-bottom: 1px solid #eee; font-size: 0.9rem; }
@@ -217,18 +221,24 @@ REPORTS_PAGE = """<!DOCTYPE html>
 
   <div id="results-section" style="display:none">
     <h2>Results</h2>
-    <details id="sql-details">
-      <summary>Show generated SQL</summary>
-      <pre id="sql-display"></pre>
-    </details>
-    <br>
-    <div id="chart-container" style="max-width:640px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:1.25rem; margin-bottom:1.5rem; display:none">
-      <canvas id="results-chart"></canvas>
+    <div id="chart-section" style="max-width:640px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:1.25rem; margin-bottom:1.5rem; display:none">
+      <div class="chart-tabs">
+        <button class="tab-btn active" data-tab="bar">Bar</button>
+        <button class="tab-btn" data-tab="pie">Pie</button>
+        <button class="tab-btn" data-tab="line">Line</button>
+      </div>
+      <div class="tab-panel" id="panel-bar"><canvas id="chart-bar"></canvas></div>
+      <div class="tab-panel" id="panel-pie" style="display:none"><canvas id="chart-pie"></canvas></div>
+      <div class="tab-panel" id="panel-line" style="display:none"><canvas id="chart-line"></canvas></div>
     </div>
     <table>
       <thead id="results-head"></thead>
       <tbody id="results-body"></tbody>
     </table>
+    <div class="sql-block">
+      <h2>Generated SQL</h2>
+      <pre id="sql-display"></pre>
+    </div>
   </div>
 
   <script>
@@ -236,7 +246,16 @@ REPORTS_PAGE = """<!DOCTYPE html>
     const btn     = document.getElementById('q-btn');
     const status  = document.getElementById('status');
     const section = document.getElementById('results-section');
-    let chartInstance = null;
+    const chartInstances = { bar: null, pie: null, line: null };
+
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-panel').forEach(p => { p.style.display = 'none'; });
+        btn.classList.add('active');
+        document.getElementById('panel-' + btn.dataset.tab).style.display = '';
+      });
+    });
 
     document.querySelectorAll('.chip').forEach(chip => {
       chip.addEventListener('click', () => { input.value = chip.textContent; runQuery(); });
@@ -268,7 +287,7 @@ REPORTS_PAGE = """<!DOCTYPE html>
 
         status.textContent = '';
         showSql(body.sql);
-        showChart(body.columns, body.rows);
+        showCharts(body.columns, body.rows);
         showTable(body.columns, body.rows);
         section.style.display = '';
       } catch (err) {
@@ -295,76 +314,98 @@ REPORTS_PAGE = """<!DOCTYPE html>
       return rows.length > 0 && rows.every(r => r[ci] === null || r[ci] === '' || !isNaN(parseFloat(r[ci])));
     }
 
-    function pickChartType(columns, rows) {
-      if (!rows.length) return null;
-      // Year in first column → line chart
-      const firstVals = rows.map(r => String(r[0]));
-      if (firstVals.every(v => /^\d{4}$/.test(v) && +v >= 1900 && +v <= 2100)) return 'line';
-      // 2-column with numeric second and few rows → pie (distribution)
-      if (columns.length === 2 && isNumericCol(rows, 1) && rows.length <= 10) return 'pie';
-      // Default → bar
-      return 'bar';
-    }
+    function showCharts(columns, rows) {
+      const chartSection = document.getElementById('chart-section');
+      for (const key of Object.keys(chartInstances)) {
+        if (chartInstances[key]) { chartInstances[key].destroy(); chartInstances[key] = null; }
+      }
 
-    function showChart(columns, rows) {
-      const container = document.getElementById('chart-container');
-      if (chartInstance) { chartInstance.destroy(); chartInstance = null; }
+      if (!rows.length) { chartSection.style.display = 'none'; return; }
 
-      const type = pickChartType(columns, rows);
-      if (!type) { container.style.display = 'none'; return; }
-
-      // Find numeric columns (all except the first, which is labels)
       const numericCols = [];
       for (let i = 1; i < columns.length; i++) {
         if (isNumericCol(rows, i)) numericCols.push(i);
       }
-      if (!numericCols.length) { container.style.display = 'none'; return; }
+      if (!numericCols.length) { chartSection.style.display = 'none'; return; }
 
-      // Rebuild canvas to avoid Chart.js reuse issues
-      container.innerHTML = '<canvas id="results-chart"></canvas>';
-      container.style.display = '';
-      const ctx = document.getElementById('results-chart').getContext('2d');
+      chartSection.style.display = '';
       const labels = rows.map(r => r[0] !== null ? String(r[0]) : '\u2014');
 
-      if (type === 'pie') {
-        const data = rows.map(r => parseFloat(r[numericCols[0]]) || 0);
-        chartInstance = new Chart(ctx, {
-          type: 'pie',
-          data: {
-            labels,
-            datasets: [{
-              data,
-              backgroundColor: PALETTE.slice(0, data.length),
-              borderColor: PALETTE_BORDER.slice(0, data.length),
-              borderWidth: 1,
-            }],
-          },
-          options: { responsive: true, plugins: { legend: { position: 'right' } } },
-        });
-      } else {
-        const datasets = numericCols.map((ci, idx) => ({
-          label: columns[ci],
-          data: rows.map(r => parseFloat(r[ci]) ?? null),
-          backgroundColor: PALETTE[idx % PALETTE.length],
-          borderColor: PALETTE_BORDER[idx % PALETTE_BORDER.length],
-          borderWidth: type === 'line' ? 2 : 1,
-          fill: false,
-          tension: 0.3,
-          pointRadius: type === 'line' ? 4 : 0,
-        }));
-        chartInstance = new Chart(ctx, {
-          type,
-          data: { labels, datasets },
-          options: {
-            responsive: true,
-            plugins: { legend: { display: datasets.length > 1 } },
-            scales: {
-              x: { grid: { color: 'rgba(0,0,0,0.05)' } },
-              y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' } },
-            },
-          },
-        });
+      // Rebuild canvases to avoid Chart.js reuse issues
+      for (const t of ['bar', 'pie', 'line']) {
+        document.getElementById('panel-' + t).innerHTML = `<canvas id="chart-${t}"></canvas>`;
       }
+
+      // Bar chart
+      chartInstances.bar = new Chart(document.getElementById('chart-bar'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: numericCols.map((ci, idx) => ({
+            label: columns[ci],
+            data: rows.map(r => parseFloat(r[ci]) ?? null),
+            backgroundColor: PALETTE[idx % PALETTE.length],
+            borderColor: PALETTE_BORDER[idx % PALETTE_BORDER.length],
+            borderWidth: 1,
+          })),
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: numericCols.length > 1 } },
+          scales: {
+            x: { grid: { color: 'rgba(0,0,0,0.05)' } },
+            y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' } },
+          },
+        },
+      });
+
+      // Pie chart (first numeric column only)
+      const pieData = rows.map(r => parseFloat(r[numericCols[0]]) || 0);
+      chartInstances.pie = new Chart(document.getElementById('chart-pie'), {
+        type: 'pie',
+        data: {
+          labels,
+          datasets: [{
+            data: pieData,
+            backgroundColor: PALETTE.slice(0, pieData.length),
+            borderColor: PALETTE_BORDER.slice(0, pieData.length),
+            borderWidth: 1,
+          }],
+        },
+        options: { responsive: true, plugins: { legend: { position: 'right' } } },
+      });
+
+      // Line chart
+      chartInstances.line = new Chart(document.getElementById('chart-line'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: numericCols.map((ci, idx) => ({
+            label: columns[ci],
+            data: rows.map(r => parseFloat(r[ci]) ?? null),
+            backgroundColor: PALETTE[idx % PALETTE.length],
+            borderColor: PALETTE_BORDER[idx % PALETTE_BORDER.length],
+            borderWidth: 2,
+            fill: false,
+            tension: 0.3,
+            pointRadius: 4,
+          })),
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: numericCols.length > 1 } },
+          scales: {
+            x: { grid: { color: 'rgba(0,0,0,0.05)' } },
+            y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' } },
+          },
+        },
+      });
+
+      // Reset to bar tab
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => { p.style.display = 'none'; });
+      document.querySelector('.tab-btn[data-tab="bar"]').classList.add('active');
+      document.getElementById('panel-bar').style.display = '';
     }
 
     function showTable(columns, rows) {
@@ -454,7 +495,8 @@ Schema:
 Rules:
   - SELECT only. No INSERT, UPDATE, DELETE, DROP, or any other statement type.
   - Use descriptive column aliases (e.g. AS "Count", AS "Race", AS "Avg Age").
-  - LIMIT 100 unless the question implies a different limit."""
+  - LIMIT 100 unless the question implies a different limit.
+  - If the question mentions charts, graphs, or visualizations, generate the SQL anyway — the application handles all rendering independently."""
 
 
 def generate_sql(question):
